@@ -1,115 +1,111 @@
 import sys
 
-from Output import Output
-from Util import FileRecorder
-from Util.Timer import Timer
+from bs4 import BeautifulSoup
+from typing import List, Optional, Dict
+
+from DB.configdb import ConfigDB
+from DB.contentdb import ContentDB
+from DB.cspdb import CSPDB
+from IO import ask, out
+from Validation import url as url_validator
+from Loader.html_loader import load_html
+from Loader.js_loader import load_external_js
+from Loader.style_loader import load_external_style
+from Analyzer.html_parser import parse_html
+from Analyzer.js_link_extractor import extract_js_link
+from Analyzer.style_link_extractor import extract_style_link
+from Analyzer.html_analyzer import analyze_html
+from Analyzer.js_analyzer import analyze_js
+from Model.external_js import ExternalJS
+from Model.external_style import ExternalStyle
+from CSP.csp_generator import generate_csp
+
+# Generate singleton object dealing with global config and csp information
+configDB: ConfigDB = ConfigDB()
+contentDB: ContentDB = ContentDB()
+cspDB: CSPDB = CSPDB()
 
 
-import WebLoader
-from JSLinkExtractor import js_link_extractor
-from Analyzer import HTMLAnalyzer, JSAnalyzer
-from CSPInfoDB import CSPInfoDB
-from CSPConfigurator import configure_csp
-from CSPViolationListPresenter import present_csp_violation_list
-
-
-def main():
-    Output.info("CSP Configuration Automation System activated")
-
-    # 対象となるURLを取得
-    target_url = Output.ask("Target URL >> ")
-
-    # 時間計測用
-
-    # 時間計測用
-    timer = Timer()
-    timer.start()
-
-    # CSP自動構成用データソースのインスタンスを生成
-    csp_info_db = CSPInfoDB()
-
-    ##########
-    # STEP 1 #
-    ##########
-    print()
-    Output.info("(1/6) Load contents")
-
-    # 対象となるURLからHTMLコンテンツを取得
-    html_response = WebLoader.html_loader(target_url)
-    html_contents = html_response.text
-
-    # HTMLコンテンツからJavaScriptコンテンツへのリンクを抽出
-    js_link_list, parsed_html = js_link_extractor(html_contents)
-
-    # JavaScriptリンクとコンテンツのリストを取得
-    WebLoader.js_loader(target_url, js_link_list, csp_info_db)
-
-    ##########
-    # STEP 2 #
-    ##########
-    print()
-    Output.info("(2/6) Analyze HTML")
-
-    # HTMLAnalyzerでHTMLを解析
-    is_success_to_analyze_HTML = HTMLAnalyzer.analyze(
-        parsed_html, csp_info_db, target_url)
-
-    if not is_success_to_analyze_HTML:
-        Output.error("Failed to analyze HTML")
-        sys.exit()
-
-    ##########
-    # STEP 3 #
-    ##########
-    print()
-    Output.info("(3/6) Analyze JavaScript")
+def get_target_url_from_user() -> str:
+    """
+    Receive a URL from the user by stdin, then return it if it is within valid URL format.
     
-    # JSAnalyzerでJavaScriptを解析
-    # JavaScriptに関するデータそのものはcsp_info_db経由で渡す
-    is_success_to_analyze_js = JSAnalyzer.analyze(csp_info_db)
+    [ok] http://correct.com  
+    [ng] invalid.net
+    """
 
-    if not is_success_to_analyze_js:
-        Output.error("Failed to analyze JavaScript")
-        sys.exit()
+    url: str = ask.ask("Target URL")
 
-    ##########
-    # STEP 4 #
-    ##########
-    print()
-    Output.info("(4/6) Configure CSP")
-
-    csp_info_meta_format, csp_info_for_display, csp_info_external_script_integrity = configure_csp(csp_info_db, parsed_html, timer)
-
-    ##########
-    # STEP 5 #
-    ##########
-    print()
-    Output.info("(5/6) Show and Record CSP")
-    
-    record_contents = "[CSP Configuration]\n{}\n\n[External Script with Integrity]\n{}\n".format(csp_info_meta_format, csp_info_external_script_integrity)
-    recorded_filename = FileRecorder.record(target_url.split("/")[-1], record_contents)
-    
-    print(csp_info_for_display)
-
-    ##########
-    # STEP 6 #
-    ##########
-    print()
-    Output.info("(6/6) Present CSP Violation List")
-    
-    if len(csp_info_db.get_violation_list()) == 0:
-        Output.info("Violations are not detected")
+    if url_validator.is_validate_url(url):
+        return url
     else:
-        Output.warn("Following violations may violate CSP policy")
-        Output.warn("Modification recommended")
-        present_csp_violation_list(csp_info_db)
+        sys.exit(-1)
 
-    print()
-    Output.info("CSP Configuration is stored at {}".format(recorded_filename))
 
-    timer.stop()
-    time = timer.get_total_time()
-    Output.info("CSP Configuration Automation System terminated successfully ({:.2} sec)".format(time))
+def main() -> None:
+    out.info("CSP Configuration Automation System activated")
+
+    configDB.set_url(get_target_url_from_user())
+
+    #################
+    # Part1         #
+    #################
+    out.info("Load contents")
+
+    # TODO: Move loading process to other file
+
+    html: str = load_html(configDB.get_url())
+    contentDB.set_parsed_html(parse_html(html))
+
+    js_links: List[str] = extract_js_link(contentDB.get_parsed_html())
+    contentDB.set_js_links(js_links)
+    
+    for js_link in contentDB.get_js_links():
+        external_js: Optional[ExternalJS] = load_external_js(js_link)
+
+        if external_js is not None:
+            contentDB.add_external_js_list(external_js)
+
+    
+    style_links: List[str] = extract_style_link(contentDB.get_parsed_html())
+    contentDB.set_style_links(style_links)
+
+    for style_link in contentDB.get_style_links():
+        external_style: Optional[ExternalStyle] = load_external_style(style_link)
+
+        if external_style is not None:
+            contentDB.add_external_style_list(external_style)
+
+    
+    #################
+    # Part2         #
+    #################
+    out.info("Analyze HTML")
+
+    analyze_html(parsed_html=contentDB.get_parsed_html())
+
+
+    #################
+    # Part3         #
+    #################
+    out.info("Analyze JavaScript")
+
+    analyze_js(inline_js_list=contentDB.get_inline_js_list(), 
+               event_handler_list=contentDB.get_event_handler_list(),
+               external_js_list=contentDB.get_external_js_list())
+
+
+    #################
+    # Part4         #
+    #################
+    out.info("Generate CSP")
+
+    generate_csp(inline_js_list=contentDB.get_inline_js_list(),
+                 external_js_list=contentDB.get_external_js_list(),
+                 inline_style_list=contentDB.get_inline_style_list(),
+                 external_style_list=contentDB.get_external_style_list(),
+                 url_in_js_list=contentDB.get_url_in_js_list())
+    
 
 if __name__ == '__main__':
     main()
